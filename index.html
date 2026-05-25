@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>摄像头交互水波纹特效</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    #glcanvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #000;
+    }
+
+    #video {
+      position: fixed;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .ui-container {
+      position: fixed;
+      left: 50%;
+      bottom: max(24px, env(safe-area-inset-bottom));
+      z-index: 10;
+      display: flex;
+      gap: 12px;
+      transform: translateX(-50%);
+    }
+
+    .btn {
+      min-width: 104px;
+      border: 1px solid rgba(255, 255, 255, 0.45);
+      border-radius: 999px;
+      padding: 12px 20px;
+      background: rgba(18, 22, 28, 0.38);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.24);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
+    }
+
+    .btn:active {
+      transform: translateY(1px);
+    }
+
+    .btn.active {
+      border-color: rgba(255, 255, 255, 0.9);
+      background: rgba(255, 255, 255, 0.86);
+      color: #080b10;
+    }
+
+    .btn:disabled {
+      cursor: wait;
+      opacity: 0.6;
+    }
+
+    .btn-cam {
+      position: fixed;
+      top: max(18px, env(safe-area-inset-top));
+      right: max(18px, env(safe-area-inset-right));
+      z-index: 10;
+      min-width: 116px;
+    }
+
+    #bootHint {
+      position: fixed;
+      left: 18px;
+      top: max(18px, env(safe-area-inset-top));
+      z-index: 9;
+      max-width: min(360px, calc(100vw - 160px));
+      padding: 10px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.36);
+      color: rgba(255, 255, 255, 0.82);
+      font-size: 12px;
+      line-height: 1.45;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+
+    #errorOverlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      overflow: auto;
+      padding: 22px;
+      background: rgba(6, 8, 12, 0.94);
+      color: #ff6b6b;
+      font: 12px/1.55 Consolas, Monaco, "Courier New", monospace;
+      white-space: pre-wrap;
+    }
+
+    @media (max-width: 520px) {
+      .ui-container {
+        width: calc(100vw - 28px);
+        gap: 8px;
+      }
+
+      .ui-container .btn {
+        flex: 1;
+        min-width: 0;
+        padding-inline: 10px;
+      }
+
+      .btn-cam {
+        min-width: 104px;
+        padding-inline: 14px;
+      }
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="glcanvas"></canvas>
+
+  <div id="bootHint">正在启动摄像头和手势检测...</div>
+
+  <div class="ui-container" aria-label="水波模式">
+    <button id="btnLiquid" class="btn active" type="button">LIQUID</button>
+    <button id="btnCrystal" class="btn" type="button">CRYSTAL</button>
+  </div>
+
+  <button id="btnCamera" class="btn btn-cam" type="button">切换摄像头</button>
+  <div id="errorOverlay" role="alert"></div>
+
+  <script>
+    "use strict";
+
+    const HANDS_CDN_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/";
+    const MAX_FINGERS = 10;
+    const TIP_IDS = [4, 8, 12, 16, 20];
+    const MAX_SIM_SIZE = 1024;
+
+    const state = {
+      canvas: null,
+      gl: null,
+      video: null,
+      bootHint: null,
+      errorOverlay: null,
+      liquidButton: null,
+      crystalButton: null,
+      cameraButton: null,
+      quadBuffer: null,
+      physicsProgram: null,
+      renderProgram: null,
+      physicsLoc: null,
+      renderLoc: null,
+      videoTex: null,
+      fboA: null,
+      fboB: null,
+      texA: null,
+      texB: null,
+      simWidth: 2,
+      simHeight: 2,
+      fboTypeName: "none",
+      stream: null,
+      hands: null,
+      handsBusy: false,
+      handsLoopStarted: false,
+      renderStarted: false,
+      frontCamera: 1.0,
+      mode: 0.0,
+      fingerData: new Float32Array(MAX_FINGERS * 4).fill(-1.0),
+      mediaPipeErrorShown: false,
+      lastHandsSend: 0,
+      lastVideoWidth: 0,
+      lastVideoHeight: 0
+    };
+
+    window.addEventListener("error", (event) => {
+      showError("页面错误: " + event.message + "\n" + (event.filename || "") + ":" + (event.lineno || 0));
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      showError("异步错误: " + formatError(event.reason));
+    });
+
+    function formatError(error) {
+      if (!error) return "Unknown error";
+      if (error.stack) return error.stack;
+      if (error.message) return error.message;
+      return String(error);
+    }
+
+    function showError(message) {
+      if (!state.errorOverlay) {
+        console.error(message);
+        return;
+      }
+
+      state.errorOverlay.style.display = "block";
+      state.errorOverlay.textContent += message + "\n\n";
+      console.error(message);
+    }
+
+    function setBootHint(message) {
+      if (!state.bootHint) return;
+      state.bootHint.textContent = message;
+      state.bootHint.style.display = message ? "block" : "none";
+    }
+
+    function numberSource(source) {
+      return source.split("\n").map((line, index) => String(index + 1).padStart(3, "0") + ": " + line).join("\n");
+    }
+
+    function getFragmentPrecision(gl) {
+      const precision = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+      return precision && precision.precision > 0 ? "precision highp float;" : "precision mediump float;";
+    }
+
+    const vertexShaderSource = `
+      attribute vec2 a_position;
+      varying vec2 v_uv;
+
+      void main() {
+        v_uv = a_position * 0.5 + 0.5;
+        gl_Position = vec4(a_position, 0.0, 1.0);
+      }
+    `;
+
+    function physicsShaderSource(precision) {
+      return `
+        ${precision}
+
+        varying vec2 v_uv;
+        uniform sampler2D u_hMap;
+        uniform vec2 u_texel;
+        uniform float u_aspect;
+        uniform vec4 u_fingers[10];
+
+        float decodeHeight(float value) {
+          return value * 2.0 - 1.0;
+        }
+
+        float encodeHeight(float height) {
+          return clamp(height * 0.5 + 0.5, 0.0, 1.0);
+        }
+
+        float activeFinger(vec2 p) {
+          return step(0.0, p.x) * step(0.0, p.y) * step(p.x, 1.0) * step(p.y, 1.0);
+        }
+
+        float capsuleDistanceSq(vec2 p, vec2 a, vec2 b, float aspect) {
+          p.x *= aspect;
+          a.x *= aspect;
+          b.x *= aspect;
+
+          vec2 pa = p - a;
+          vec2 ba = b - a;
+          float h = clamp(dot(pa, ba) / (dot(ba, ba) + 1e-6), 0.0, 1.0);
+          vec2 d = pa - ba * h;
+          return dot(d, d);
+        }
+
+        void main() {
+          vec4 raw = texture2D(u_hMap, v_uv);
+          float c = decodeHeight(raw.r);
+          float p = decodeHeight(raw.g);
+
+          float t = decodeHeight(texture2D(u_hMap, v_uv + vec2(0.0, u_texel.y)).r);
+          float b = decodeHeight(texture2D(u_hMap, v_uv - vec2(0.0, u_texel.y)).r);
+          float l = decodeHeight(texture2D(u_hMap, v_uv - vec2(u_texel.x, 0.0)).r);
+          float r = decodeHeight(texture2D(u_hMap, v_uv + vec2(u_texel.x, 0.0)).r);
+          float tl = decodeHeight(texture2D(u_hMap, v_uv + vec2(-u_texel.x, u_texel.y)).r);
+          float tr = decodeHeight(texture2D(u_hMap, v_uv + vec2(u_texel.x, u_texel.y)).r);
+          float bl = decodeHeight(texture2D(u_hMap, v_uv + vec2(-u_texel.x, -u_texel.y)).r);
+          float br = decodeHeight(texture2D(u_hMap, v_uv + vec2(u_texel.x, -u_texel.y)).r);
+
+          float lap = 0.5 * (t + b + l + r) + 0.25 * (tl + tr + bl + br) - 3.0 * c;
+          float newH = 2.0 * c - p + lap * 0.34;
+
+          for (int i = 0; i < 10; i++) {
+            vec2 curr = u_fingers[i].xy;
+            vec2 prev = u_fingers[i].zw;
+            float active = activeFinger(curr) * activeFinger(prev);
+            float d2 = capsuleDistanceSq(v_uv, prev, curr, u_aspect);
+            float stroke = exp(-d2 * 2600.0) * active;
+            float speed = length((curr - prev) * vec2(u_aspect, 1.0));
+            float strength = 0.032 + smoothstep(0.0, 0.035, speed) * 0.11;
+            newH += stroke * strength;
+          }
+
+          float amp = abs(newH);
+          float damping = mix(0.954, 0.993, smoothstep(0.0, 0.10, amp));
+          newH = clamp(newH * damping, -0.96, 0.96);
+
+          gl_FragColor = vec4(encodeHeight(newH), encodeHeight(c), 0.0, 1.0);
+        }
+      `;
+    }
+
+    function renderShaderSource(precision) {
+      return `
+        ${precision}
+
+        varying vec2 v_uv;
+        uniform sampler2D u_hMap;
+        uniform sampler2D u_video;
+        uniform vec2 u_texel;
+        uniform float u_canvasAspect;
+        uniform float u_videoAspect;
+        uniform float u_isFrontCamera;
+        uniform float u_mode;
+
+        float decodeHeight(float value) {
+          return value * 2.0 - 1.0;
+        }
+
+        vec2 coverVideoUv(vec2 screenUv) {
+          float wideCanvas = step(u_videoAspect, u_canvasAspect);
+          vec2 cropNarrow = vec2(u_canvasAspect / max(u_videoAspect, 1e-4), 1.0);
+          vec2 cropWide = vec2(1.0, u_videoAspect / max(u_canvasAspect, 1e-4));
+          vec2 cover = mix(cropNarrow, cropWide, wideCanvas);
+          vec2 videoUv = (screenUv - 0.5) * cover + 0.5;
+          videoUv.x = mix(videoUv.x, 1.0 - videoUv.x, u_isFrontCamera);
+          return clamp(videoUv, vec2(0.001), vec2(0.999));
+        }
+
+        vec3 cameraColor(vec2 screenUv) {
+          return texture2D(u_video, coverVideoUv(screenUv)).rgb;
+        }
+
+        void main() {
+          float c = decodeHeight(texture2D(u_hMap, v_uv).r);
+          float l = decodeHeight(texture2D(u_hMap, v_uv - vec2(u_texel.x, 0.0)).r);
+          float r = decodeHeight(texture2D(u_hMap, v_uv + vec2(u_texel.x, 0.0)).r);
+          float t = decodeHeight(texture2D(u_hMap, v_uv + vec2(0.0, u_texel.y)).r);
+          float b = decodeHeight(texture2D(u_hMap, v_uv - vec2(0.0, u_texel.y)).r);
+
+          vec2 grad = vec2(r - l, t - b);
+          float lap = t + b + l + r - 4.0 * c;
+
+          float refraction = mix(0.17, 0.34, u_mode);
+          float dispersion = mix(0.020, 0.095, u_mode);
+          float lensStrength = mix(0.55, 1.85, u_mode);
+          float normalScale = mix(18.0, 30.0, u_mode);
+          float specScale = mix(0.75, 1.55, u_mode);
+
+          vec2 lensUv = v_uv + (v_uv - 0.5) * lap * lensStrength;
+          vec2 bend = grad * refraction;
+
+          float red = cameraColor(lensUv + bend * (1.0 + dispersion)).r;
+          float green = cameraColor(lensUv + bend).g;
+          float blue = cameraColor(lensUv + bend * (1.0 - dispersion)).b;
+          vec3 color = vec3(red, green, blue);
+
+          vec3 normal = normalize(vec3(-grad.x * normalScale, -grad.y * normalScale, 1.0));
+          vec3 viewDir = vec3(0.0, 0.0, 1.0);
+          vec3 lightDir = normalize(vec3(0.45, 0.72, 0.95));
+          vec3 halfDir = normalize(lightDir + viewDir);
+
+          float ndv = max(dot(normal, viewDir), 0.0);
+          float ndh = max(dot(normal, halfDir), 0.0);
+          float fresnel = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+          float sharpSpec = pow(ndh, mix(124.0, 246.0, u_mode));
+          float broadSheen = pow(ndh, 16.0) * 0.30;
+          float crest = smoothstep(0.005, 0.11, c);
+          float trough = smoothstep(0.005, 0.11, -c);
+
+          vec3 warm = vec3(1.10, 1.025, 0.92);
+          vec3 cool = vec3(0.76, 0.89, 1.13);
+          vec3 depthTint = color * (1.0 + crest * (warm - 1.0) + trough * (cool - 1.0));
+          color = mix(color, depthTint, clamp(abs(c) * 14.0, 0.0, 1.0));
+
+          vec3 reflection = vec3(0.88, 0.96, 1.0) * (sharpSpec + broadSheen) * specScale;
+          color += reflection * (0.45 + fresnel * 2.35);
+          color += vec3(0.35, 0.55, 0.72) * fresnel * mix(0.055, 0.12, u_mode);
+
+          float contrast = mix(1.02, 1.13, u_mode);
+          color = (color - 0.5) * contrast + 0.5;
+          gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+        }
+      `;
+    }
+
+    function compileShader(gl, type, source, label) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(shader) || "Unknown shader compile error";
+        showError(label + " 编译失败:\n" + log + "\n\n" + numberSource(source));
+        gl.deleteShader(shader);
+        return null;
+      }
+
+      return shader;
+    }
+
+    function createProgram(gl, vsSource, fsSource, label) {
+      const vertexShader = compileShader(gl, gl.VERTEX_SHADER, vsSource, label + " vertex shader");
+      const fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, fsSource, label + " fragment shader");
+      if (!vertexShader || !fragmentShader) return null;
+
+      const program = gl.createProgram();
+      gl.attachShader(program, vertexShader);
+      gl.attachShader(program, fragmentShader);
+      gl.linkProgram(program);
+      gl.deleteShader(vertexShader);
+      gl.deleteShader(fragmentShader);
+
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        showError(label + " 链接失败:\n" + (gl.getProgramInfoLog(program) || "Unknown program link error"));
+        gl.deleteProgram(program);
+        return null;
+      }
+
+      return program;
+    }
+
+    function initWebGL() {
+      const gl = state.canvas.getContext("webgl", {
+        alpha: false,
+        antialias: false,
+        depth: false,
+        stencil: false,
+        preserveDrawingBuffer: false
+      }) || state.canvas.getContext("experimental-webgl");
+
+      if (!gl) {
+        throw new Error("当前浏览器不支持 WebGL1。");
+      }
+
+      state.gl = gl;
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.CULL_FACE);
+      gl.disable(gl.BLEND);
+
+      const precision = getFragmentPrecision(gl);
+      state.physicsProgram = createProgram(gl, vertexShaderSource, physicsShaderSource(precision), "Physics shader");
+      state.renderProgram = createProgram(gl, vertexShaderSource, renderShaderSource(precision), "Render shader");
+
+      if (!state.physicsProgram || !state.renderProgram) {
+        throw new Error("Shader 初始化失败，详情见页面错误层。");
+      }
+
+      state.quadBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, state.quadBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        -1, -1, 1, -1, -1, 1,
+        -1, 1, 1, -1, 1, 1
+      ]), gl.STATIC_DRAW);
+
+      state.physicsLoc = {
+        position: gl.getAttribLocation(state.physicsProgram, "a_position"),
+        hMap: gl.getUniformLocation(state.physicsProgram, "u_hMap"),
+        texel: gl.getUniformLocation(state.physicsProgram, "u_texel"),
+        aspect: gl.getUniformLocation(state.physicsProgram, "u_aspect"),
+        fingers: gl.getUniformLocation(state.physicsProgram, "u_fingers")
+      };
+
+      state.renderLoc = {
+        position: gl.getAttribLocation(state.renderProgram, "a_position"),
+        hMap: gl.getUniformLocation(state.renderProgram, "u_hMap"),
+        video: gl.getUniformLocation(state.renderProgram, "u_video"),
+        texel: gl.getUniformLocation(state.renderProgram, "u_texel"),
+        canvasAspect: gl.getUniformLocation(state.renderProgram, "u_canvasAspect"),
+        videoAspect: gl.getUniformLocation(state.renderProgram, "u_videoAspect"),
+        isFrontCamera: gl.getUniformLocation(state.renderProgram, "u_isFrontCamera"),
+        mode: gl.getUniformLocation(state.renderProgram, "u_mode")
+      };
+
+      state.videoTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, state.videoTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+
+      resize();
+      window.addEventListener("resize", resize, { passive: true });
+      window.addEventListener("orientationchange", () => setTimeout(resize, 160), { passive: true });
+    }
+
+    function createTarget(width, height, type) {
+      const gl = state.gl;
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, type, null);
+
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return { tex, fbo, complete: status === gl.FRAMEBUFFER_COMPLETE, status };
+    }
+
+    function disposeTarget(target) {
+      if (!target) return;
+      const gl = state.gl;
+      if (target.fbo) gl.deleteFramebuffer(target.fbo);
+      if (target.tex) gl.deleteTexture(target.tex);
+    }
+
+    function framebufferStatusName(status) {
+      const gl = state.gl;
+      const names = {};
+      names[gl.FRAMEBUFFER_INCOMPLETE_ATTACHMENT] = "FRAMEBUFFER_INCOMPLETE_ATTACHMENT";
+      names[gl.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT] = "FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT";
+      names[gl.FRAMEBUFFER_INCOMPLETE_DIMENSIONS] = "FRAMEBUFFER_INCOMPLETE_DIMENSIONS";
+      names[gl.FRAMEBUFFER_UNSUPPORTED] = "FRAMEBUFFER_UNSUPPORTED";
+      return names[status] || String(status);
+    }
+
+    function createHeightBuffers(width, height) {
+      const gl = state.gl;
+      const halfFloat = gl.getExtension("OES_texture_half_float");
+      gl.getExtension("OES_texture_half_float_linear");
+      gl.getExtension("EXT_color_buffer_half_float");
+      const floatTex = gl.getExtension("OES_texture_float");
+      gl.getExtension("OES_texture_float_linear");
+      gl.getExtension("WEBGL_color_buffer_float");
+
+      const candidates = [];
+      if (halfFloat) candidates.push({ name: "half-float", type: halfFloat.HALF_FLOAT_OES });
+      if (floatTex) candidates.push({ name: "float", type: gl.FLOAT });
+      candidates.push({ name: "unsigned-byte", type: gl.UNSIGNED_BYTE });
+
+      const failures = [];
+      for (const candidate of candidates) {
+        const a = createTarget(width, height, candidate.type);
+        const b = createTarget(width, height, candidate.type);
+        if (a.complete && b.complete) {
+          disposeTarget({ fbo: state.fboA, tex: state.texA });
+          disposeTarget({ fbo: state.fboB, tex: state.texB });
+          state.fboA = a.fbo;
+          state.texA = a.tex;
+          state.fboB = b.fbo;
+          state.texB = b.tex;
+          state.fboTypeName = candidate.name;
+          clearHeightBuffers();
+          return;
+        }
+
+        failures.push(candidate.name + ": " + framebufferStatusName(a.status) + " / " + framebufferStatusName(b.status));
+        disposeTarget(a);
+        disposeTarget(b);
+      }
+
+      throw new Error("无法创建可渲染的 WebGL1 FBO 高度场纹理。\n" + failures.join("\n"));
+    }
+
+    function clearHeightBuffers() {
+      const gl = state.gl;
+      const oldViewport = gl.getParameter(gl.VIEWPORT);
+
+      gl.viewport(0, 0, state.simWidth, state.simHeight);
+      gl.clearColor(0.5, 0.5, 0.0, 1.0);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, state.fboA);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, state.fboB);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+      gl.viewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+    }
+
+    function resize() {
+      if (!state.gl || !state.canvas) return;
+
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const displayWidth = Math.max(2, Math.floor(window.innerWidth * dpr));
+      const displayHeight = Math.max(2, Math.floor(window.innerHeight * dpr));
+
+      if (state.canvas.width !== displayWidth || state.canvas.height !== displayHeight) {
+        state.canvas.width = displayWidth;
+        state.canvas.height = displayHeight;
+      }
+
+      const simScale = Math.min(1, MAX_SIM_SIZE / Math.max(displayWidth, displayHeight));
+      const nextSimWidth = Math.max(2, Math.floor(displayWidth * simScale));
+      const nextSimHeight = Math.max(2, Math.floor(displayHeight * simScale));
+
+      if (nextSimWidth !== state.simWidth || nextSimHeight !== state.simHeight || !state.fboA || !state.fboB) {
+        state.simWidth = nextSimWidth;
+        state.simHeight = nextSimHeight;
+        createHeightBuffers(state.simWidth, state.simHeight);
+        state.fingerData.fill(-1.0);
+      }
+
+      state.gl.viewport(0, 0, state.canvas.width, state.canvas.height);
+    }
+
+    function bindQuad(program, positionLocation) {
+      const gl = state.gl;
+      gl.useProgram(program);
+      gl.bindBuffer(gl.ARRAY_BUFFER, state.quadBuffer);
+      gl.enableVertexAttribArray(positionLocation);
+      gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+    }
+
+    function updateVideoTexture() {
+      const gl = state.gl;
+      const video = state.video;
+
+      if (video.readyState < video.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) return;
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, state.videoTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+
+      state.lastVideoWidth = video.videoWidth;
+      state.lastVideoHeight = video.videoHeight;
+    }
+
+    function renderLoop() {
+      const gl = state.gl;
+      if (!gl) return;
+
+      updateVideoTexture();
+
+      bindQuad(state.physicsProgram, state.physicsLoc.position);
+      gl.viewport(0, 0, state.simWidth, state.simHeight);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, state.fboB);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, state.texA);
+      gl.uniform1i(state.physicsLoc.hMap, 0);
+      gl.uniform2f(state.physicsLoc.texel, 1 / state.simWidth, 1 / state.simHeight);
+      gl.uniform1f(state.physicsLoc.aspect, state.canvas.width / state.canvas.height);
+      gl.uniform4fv(state.physicsLoc.fingers, state.fingerData);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      bindQuad(state.renderProgram, state.renderLoc.position);
+      gl.viewport(0, 0, state.canvas.width, state.canvas.height);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, state.texB);
+      gl.uniform1i(state.renderLoc.hMap, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, state.videoTex);
+      gl.uniform1i(state.renderLoc.video, 1);
+      gl.uniform2f(state.renderLoc.texel, 1 / state.simWidth, 1 / state.simHeight);
+      gl.uniform1f(state.renderLoc.canvasAspect, state.canvas.width / state.canvas.height);
+      gl.uniform1f(state.renderLoc.videoAspect, getVideoAspect());
+      gl.uniform1f(state.renderLoc.isFrontCamera, state.frontCamera);
+      gl.uniform1f(state.renderLoc.mode, state.mode);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      const tmpFbo = state.fboA;
+      const tmpTex = state.texA;
+      state.fboA = state.fboB;
+      state.texA = state.texB;
+      state.fboB = tmpFbo;
+      state.texB = tmpTex;
+
+      for (let i = 0; i < MAX_FINGERS; i++) {
+        const offset = i * 4;
+        if (state.fingerData[offset] >= 0) {
+          state.fingerData[offset + 2] = state.fingerData[offset];
+          state.fingerData[offset + 3] = state.fingerData[offset + 1];
+        }
+      }
+
+      requestAnimationFrame(renderLoop);
+    }
+
+    function getVideoAspect() {
+      if (state.video && state.video.videoWidth && state.video.videoHeight) {
+        return state.video.videoWidth / state.video.videoHeight;
+      }
+      return 16 / 9;
+    }
+
+    function getCoverScale() {
+      const canvasAspect = state.canvas.width / state.canvas.height;
+      const videoAspect = getVideoAspect();
+      if (canvasAspect > videoAspect) {
+        return { x: 1, y: videoAspect / canvasAspect };
+      }
+      return { x: canvasAspect / videoAspect, y: 1 };
+    }
+
+    function videoUvToScreenUv(x, y) {
+      const cover = getCoverScale();
+      const displayX = state.frontCamera > 0.5 ? 1 - x : x;
+      const displayY = 1 - y;
+      const screenX = (displayX - 0.5) / cover.x + 0.5;
+      const screenY = (displayY - 0.5) / cover.y + 0.5;
+
+      if (screenX < -0.04 || screenX > 1.04 || screenY < -0.04 || screenY > 1.04) {
+        return null;
+      }
+
+      return {
+        x: Math.min(1, Math.max(0, screenX)),
+        y: Math.min(1, Math.max(0, screenY))
+      };
+    }
+
+    function onHandsResults(results) {
+      const next = new Float32Array(MAX_FINGERS * 4).fill(-1.0);
+      let index = 0;
+
+      if (results.multiHandLandmarks) {
+        for (const landmarks of results.multiHandLandmarks) {
+          for (const tipId of TIP_IDS) {
+            if (index >= MAX_FINGERS) break;
+            const tip = landmarks[tipId];
+            const mapped = videoUvToScreenUv(tip.x, tip.y);
+
+            if (mapped) {
+              const offset = index * 4;
+              let prevX = state.fingerData[offset];
+              let prevY = state.fingerData[offset + 1];
+              if (prevX < 0 || prevY < 0) {
+                prevX = mapped.x;
+                prevY = mapped.y;
+              }
+
+              next[offset] = mapped.x;
+              next[offset + 1] = mapped.y;
+              next[offset + 2] = prevX;
+              next[offset + 3] = prevY;
+            }
+
+            index++;
+          }
+        }
+      }
+
+      state.fingerData = next;
+    }
+
+    async function setupHands() {
+      if (!window.Hands) {
+        throw new Error("MediaPipe Hands 加载失败，请确认 CDN 可访问: " + HANDS_CDN_BASE);
+      }
+
+      state.hands = new window.Hands({
+        locateFile: (file) => HANDS_CDN_BASE + file
+      });
+
+      state.hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.55,
+        minTrackingConfidence: 0.50
+      });
+
+      state.hands.onResults(onHandsResults);
+    }
+
+    function startHandsLoop() {
+      if (state.handsLoopStarted) return;
+      state.handsLoopStarted = true;
+
+      const loop = async (now) => {
+        if (
+          state.hands &&
+          !state.handsBusy &&
+          state.video.readyState >= state.video.HAVE_CURRENT_DATA &&
+          now - state.lastHandsSend > 33
+        ) {
+          state.handsBusy = true;
+          state.lastHandsSend = now;
+          try {
+            await state.hands.send({ image: state.video });
+          } catch (error) {
+            if (!state.mediaPipeErrorShown) {
+              state.mediaPipeErrorShown = true;
+              showError("MediaPipe Hands 运行失败:\n" + formatError(error));
+            }
+          } finally {
+            state.handsBusy = false;
+          }
+        }
+
+        requestAnimationFrame(loop);
+      };
+
+      requestAnimationFrame(loop);
+    }
+
+    function stopStream() {
+      if (!state.stream) return;
+      state.stream.getTracks().forEach((track) => track.stop());
+      state.stream = null;
+    }
+
+    async function requestCameraStream(facingMode) {
+      const attempts = [
+        {
+          video: {
+            facingMode: { exact: facingMode },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        },
+        {
+          video: {
+            facingMode,
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        },
+        {
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        }
+      ];
+
+      let lastError = null;
+      for (const constraints of attempts) {
+        try {
+          return await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      throw lastError || new Error("无法打开摄像头。");
+    }
+
+    async function setupCamera() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("当前浏览器不支持 getUserMedia 摄像头接口。");
+      }
+
+      stopStream();
+      state.fingerData.fill(-1.0);
+
+      const facingMode = state.frontCamera > 0.5 ? "user" : "environment";
+      state.stream = await requestCameraStream(facingMode);
+      state.video.srcObject = state.stream;
+
+      await new Promise((resolve, reject) => {
+        const done = () => {
+          state.video.removeEventListener("loadedmetadata", done);
+          state.video.removeEventListener("error", fail);
+          resolve();
+        };
+        const fail = () => {
+          state.video.removeEventListener("loadedmetadata", done);
+          state.video.removeEventListener("error", fail);
+          reject(new Error("摄像头视频流加载失败。"));
+        };
+        state.video.addEventListener("loadedmetadata", done, { once: true });
+        state.video.addEventListener("error", fail, { once: true });
+      });
+
+      await state.video.play();
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      state.liquidButton.classList.toggle("active", mode < 0.5);
+      state.crystalButton.classList.toggle("active", mode >= 0.5);
+    }
+
+    async function toggleCamera() {
+      const previous = state.frontCamera;
+      state.frontCamera = previous > 0.5 ? 0.0 : 1.0;
+      state.cameraButton.disabled = true;
+      state.cameraButton.textContent = "切换中...";
+
+      try {
+        await setupCamera();
+      } catch (error) {
+        state.frontCamera = previous;
+        showError("切换摄像头失败:\n" + formatError(error));
+      } finally {
+        state.cameraButton.disabled = false;
+        state.cameraButton.textContent = "切换摄像头";
+      }
+    }
+
+    async function startApp() {
+      state.canvas = document.getElementById("glcanvas");
+      state.video = document.getElementById("video");
+      state.bootHint = document.getElementById("bootHint");
+      state.errorOverlay = document.getElementById("errorOverlay");
+      state.liquidButton = document.getElementById("btnLiquid");
+      state.crystalButton = document.getElementById("btnCrystal");
+      state.cameraButton = document.getElementById("btnCamera");
+
+      state.liquidButton.addEventListener("click", () => setMode(0.0));
+      state.crystalButton.addEventListener("click", () => setMode(1.0));
+      state.cameraButton.addEventListener("click", () => {
+        toggleCamera().catch((error) => showError("切换摄像头失败:\n" + formatError(error)));
+      });
+
+      setBootHint("正在初始化 WebGL1...");
+      initWebGL();
+
+      setBootHint("正在请求摄像头权限...");
+      await setupCamera();
+
+      setBootHint("正在加载 MediaPipe Hands...");
+      await setupHands();
+
+      setBootHint("");
+      startHandsLoop();
+
+      if (!state.renderStarted) {
+        state.renderStarted = true;
+        requestAnimationFrame(renderLoop);
+      }
+
+      console.info("Water ripple camera effect started with FBO type:", state.fboTypeName);
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+      startApp().catch((error) => {
+        setBootHint("");
+        showError("启动失败:\n" + formatError(error) + "\n\n提示：摄像头通常需要 HTTPS、localhost，或浏览器允许 file:// 访问摄像头。");
+      });
+    });
+  </script>
+</body>
+</html>
