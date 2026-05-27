@@ -342,7 +342,7 @@
           }
 
           float amp = abs(newH);
-          float damping = mix(0.900, 0.965, smoothstep(0.0, 0.13, amp));
+          float damping = mix(0.810, 0.930, smoothstep(0.0, 0.13, amp));
           newH = clamp(newH * damping, -0.86, 0.86);
 
           gl_FragColor = vec4(encodeHeight(newH), encodeHeight(c), 0.0, 1.0);
